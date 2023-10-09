@@ -1,0 +1,230 @@
+#include <Wire.h>
+#include <SD_MMC.h>
+#include <esp_camera.h>
+#include <esp_task_wdt.h>
+
+int value;
+#define LSM6DSR_ADDRESS 0x6B  // I2C address of the sensor
+#define CTRL1_XL_REG 0x10     // Register address for accelerometer control
+#define CTRL2_G_REG 0x11      // Register address for gyroscope control
+#define ACCEL_DATA_REG 0x28   // Register address for accelerometer data (LSB)
+#define GYRO_DATA_REG 0x22    // Register address for accelerometer data (LSB)
+#define INT1_CTRL_REG 0x0D    // Register address for INT1_CTRL
+
+#define INT1_PIN 34  // This could be any digital pin on the ESP32 for INT1
+volatile bool suddenAccelerationDetected = false;
+
+byte receivedData[6];
+
+int16_t accelX;
+int16_t accelY;
+int16_t accelZ;
+double x3;
+double y3;
+double z3;
+double Xarray[2];
+int threshold = 5;
+
+#define minVal -8315
+#define maxVal 8315
+
+#define FILE_NAME_SIZE 100
+#define FILE_NAME_ADDR 0  // EEPROM address to store the image name
+#define MAX_IMAGES 1000
+char fileName[FILE_NAME_SIZE] = "/image.jpg";    // Default image name
+File file;
+
+// Define the pins for the camera module
+#define CAMERA_MODEL_ESP_EYE  // Has PSRAM
+#define PWDN_GPIO_NUM -1
+#define RESET_GPIO_NUM -1
+#define XCLK_GPIO_NUM 15
+#define SIOD_GPIO_NUM 20
+#define SIOC_GPIO_NUM 19
+#define Y9_GPIO_NUM 16
+#define Y8_GPIO_NUM 17
+#define Y7_GPIO_NUM 18
+#define Y6_GPIO_NUM 12
+#define Y5_GPIO_NUM 10
+#define Y4_GPIO_NUM 8
+#define Y3_GPIO_NUM 9
+#define Y2_GPIO_NUM 11
+#define VSYNC_GPIO_NUM 6
+#define HREF_GPIO_NUM 7
+#define PCLK_GPIO_NUM 13
+
+
+
+void setup() {
+ 
+  Serial.begin(115200);   // Start serial communication for debugging
+  initCamera();
+  // Initialize the WDT with a timeout of 3 seconds (adjust as needed)
+  esp_task_wdt_init(1, true);
+  // Initialize SD card
+  SD_MMC.setPins(39, 38, 40);
+  if (!SD_MMC.begin("/sdcard", true, false, 20000, 5)) {
+    Serial.println("SD card initialization failed");
+    return;
+  }
+  Wire.begin(4,5);          // Initialize I2C communication
+  Serial.println("SD card Initialzed");
+  initializeSensor();
+  Serial.println("Sensor Initialzed");
+  pinMode(INT1_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(INT1_PIN), handleLSMInterrupt, RISING);
+}
+
+void loop() {
+  // Reset the WDT timer periodically in your loop
+  esp_task_wdt_reset();
+  // captureAndSaveImage();
+  readAndPrintSensorData();
+  if (suddenAccelerationDetected) {
+    suddenAccelerationDetected = false;
+    handleSuddenAcceleration(); 
+  }
+  delay(1000); // Delay for 1 second before the next reading
+}
+
+void handleLSMInterrupt() {
+  suddenAccelerationDetected = true;
+  captureAndSaveImage();
+}
+
+void handleSuddenAcceleration() {
+  Wire.beginTransmission(LSM6DSR_ADDRESS);
+  Wire.write(GYRO_DATA_REG);
+  Wire.endTransmission();
+
+  Wire.requestFrom(LSM6DSR_ADDRESS, 6, false);  // Request 6 bytes (X, Y, Z accelerometer data)
+  for (int i = 0; i < 6; i++) {
+    receivedData[i] = Wire.read();
+  }
+  accelX = (receivedData[1] << 8) | receivedData[0];  // Combine LSB and MSB
+  accelY = (receivedData[3] << 8) | receivedData[2];
+  accelZ = (receivedData[5] << 8) | receivedData[4];
+
+  int xAng = map(accelX, minVal, maxVal, -90, 90);
+  int yAng = map(accelY, minVal, maxVal, -90, 90);
+  int zAng = map(accelZ, minVal, maxVal, -90, 90);
+  x3 = RAD_TO_DEG * (atan2(-yAng, -zAng) + PI);
+  y3 = RAD_TO_DEG * (atan2(-xAng, -zAng) + PI);
+  z3 = RAD_TO_DEG * (atan2(-yAng, -xAng) + PI);
+
+  Serial.print("Sudden Acceleration Detected! X:");
+  Serial.println(x3);
+}
+
+
+void initializeSensor() {
+  // Configure accelerometer settings
+  Serial.println("Sensor Initialzation procress on-going 1");
+  Wire.beginTransmission(LSM6DSR_ADDRESS);
+  Serial.println("Sensor Initialzation procress on-going 2");
+  Wire.write(CTRL1_XL_REG);
+  Serial.println("Sensor Initialzation procress on-going 3");
+  // Set the accelerometer scale to ±2g (you can choose ±4g, ±8g, or ±16g as well)
+  Wire.write(0x18);
+  Serial.println("Sensor Initialzation procress on-going 4");
+  Wire.endTransmission();
+  Serial.println("Sensor Initialzation procress on-going 5");
+  
+}
+
+void readAndPrintSensorData() {
+  Wire.beginTransmission(LSM6DSR_ADDRESS);
+  Wire.write(ACCEL_DATA_REG);
+  Wire.endTransmission();
+  Wire.requestFrom(LSM6DSR_ADDRESS, 6); // Request 6 bytes (X, Y, Z accelerometer data)
+   for (int i = 0; i < 6; i++) {
+    receivedData[i] = Wire.read();
+  }
+  accelX =  (receivedData[1] << 8) | receivedData[0] ; // Combine LSB and MSB
+  accelY =  (receivedData[3] << 8) | receivedData[2] ;
+  accelZ =  (receivedData[5] << 8) | receivedData[4] ;
+  
+  int xAng = map(accelX, minVal, maxVal, -90, 90);
+  int yAng = map(accelY, minVal, maxVal, -90, 90);
+  int zAng = map(accelZ, minVal, maxVal, -90, 90);
+  x3 = RAD_TO_DEG * (atan2(-yAng, -zAng) + PI);
+  y3 = RAD_TO_DEG * (atan2(-xAng, -zAng) + PI);
+  z3 = RAD_TO_DEG * (atan2(-yAng, -xAng) + PI);
+
+  Xarray[0] = Xarray[1];
+  Xarray[1] = x3;
+  float Xaxis_difff = abs(Xarray[1] -  Xarray[0]);
+
+  Serial.print("X:");
+  Serial.println(x3);
+  Serial.print("Angle difference: ");
+  Serial.println(Xaxis_difff);
+
+   if (Xaxis_difff > threshold) {
+    suddenAccelerationDetected = true;
+  }
+}
+
+
+void captureAndSaveImage() {
+  camera_fb_t* fb = NULL;
+  fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Failed to capture image");
+    return;
+  }
+
+  // Save the image with the given file name to SD card
+  file = SD_MMC.open(fileName, FILE_WRITE);
+  if (file) {
+    file.write(fb->buf, fb->len);
+    file.close();
+    Serial.println("Image saved to SD card");
+  } else {
+    Serial.println("Failed to save image to SD card");
+  }
+  esp_camera_fb_return(fb);
+}
+
+void initCamera(){
+ // OV2640 camera module
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_LATEST;
+
+  if (psramFound()) {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 10;
+    config.fb_count = 1;
+     Serial.println("Camera initialized with QSXGA");
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
+  // Camera init
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    ESP.restart();
+  } 
+}
